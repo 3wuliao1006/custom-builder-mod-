@@ -1,0 +1,16 @@
+﻿{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "###",
+    "# #",
+    "###"
+  ],
+  "key": {
+    "#": "custom_builder:blueprint_workbench"
+  },
+  "result": {
+    "id": "custom_builder:blueprint_station",
+    "count": 1
+  }
+}

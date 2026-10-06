@@ -1,0 +1,12 @@
+﻿{
+  "parent": "minecraft:block/cube",
+  "textures": {
+    "particle": "custom_builder:block/blueprint_station_side",
+    "down": "custom_builder:block/blueprint_workbench_bottom",
+    "up": "custom_builder:block/blueprint_station_top",
+    "north": "custom_builder:block/blueprint_station_side",
+    "south": "custom_builder:block/blueprint_station_side",
+    "west": "custom_builder:block/blueprint_station_side",
+    "east": "custom_builder:block/blueprint_station_side"
+  }
+}

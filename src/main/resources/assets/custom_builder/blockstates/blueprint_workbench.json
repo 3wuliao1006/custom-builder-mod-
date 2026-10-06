@@ -1,0 +1,7 @@
+﻿{
+  "variants": {
+    "": {
+      "model": "custom_builder:block/blueprint_workbench"
+    }
+  }
+}

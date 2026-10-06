@@ -1,0 +1,7 @@
+﻿{
+  "replace": false,
+  "values": [
+    "custom_builder:blueprint_workbench",
+    "custom_builder:blueprint_station"
+  ]
+}
