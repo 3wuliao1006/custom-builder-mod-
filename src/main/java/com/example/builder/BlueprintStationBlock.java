@@ -1,16 +1,13 @@
 package com.example.builder;
 
 import com.google.gson.Gson;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.core.Holder;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.Container;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -20,22 +17,24 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.BlockHitResult;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
-import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
 
 public class BlueprintStationBlock extends Block {
+
     private static final Gson GSON = new Gson();
-    private static final Map<BlockPos, BlueprintWorkbenchBlock.BlueprintFile> LOADED_BLUEPRINTS = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, BlueprintWorkbenchBlock.BlueprintFile> LOADED_BLUEPRINTS = new HashMap<>();
 
     public BlueprintStationBlock(BlockBehaviour.Properties properties) {
         super(properties);
@@ -43,209 +42,255 @@ public class BlueprintStationBlock extends Block {
 
     @Override
     protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hitResult) {
-        // 阶段 1：未载入蓝图时，唤起 Windows 系统原生文件选择器（自由切换 C/D 盘）
-        if (!LOADED_BLUEPRINTS.containsKey(pos)) {
-            if (level.isClientSide()) {
-                player.sendSystemMessage(Component.literal("\u00a7e[\u84dd\u56fe\u5de5\u4f5c\u7ad9] \u6b63\u5728\u6253\u5f00 Windows \u6587\u4ef6\u9009\u62e9\u7a97\u53e3\uff0c\u8bf7\u7a0d\u5019..."));
-
-                // 在独立后台线程中唤起 Windows 系统的 OpenFileDialog，不受 Java AWT 限制且不卡游戏
-                new Thread(() -> {
-                    try {
-                        Path defaultDir = FabricLoader.getInstance().getGameDir().resolve("blueprints");
-                        File dir = defaultDir.toFile();
-                        if (!dir.exists()) {
-                            dir.mkdirs();
-                        }
-
-                        // 借助系统底层直接唤出置顶的 OpenFileDialog 对话框
-                        String initialPath = dir.getAbsolutePath().replace("'", "''");
-                        String psCommand = "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
-                                + "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-                                + "$f.InitialDirectory = '" + initialPath + "'; "
-                                + "$f.Filter = 'Blueprint JSON (*.json)|*.json|All files (*.*)|*.*'; "
-                                + "$f.Title = '请选择要建造的装置蓝图文件'; "
-                                + "$topForm = New-Object System.Windows.Forms.Form; "
-                                + "$topForm.TopMost = $true; "
-                                + "if ($f.ShowDialog($topForm) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }";
-
-                        Process process = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", psCommand).start();
-
-                        String chosenPath = null;
-                        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                            String line;
-                            while ((line = reader.readLine()) != null) {
-                                if (!line.trim().isEmpty()) {
-                                    chosenPath = line.trim();
-                                }
-                            }
-                        }
-                        process.waitFor();
-
-                        if (chosenPath != null && !chosenPath.isEmpty()) {
-                            File selectedFile = new File(chosenPath);
-                            if (selectedFile.exists()) {
-                                try (FileReader fr = new FileReader(selectedFile, StandardCharsets.UTF_8)) {
-                                    BlueprintWorkbenchBlock.BlueprintFile bp = GSON.fromJson(fr, BlueprintWorkbenchBlock.BlueprintFile.class);
-                                    if (bp != null && bp.requiredMaterials != null) {
-                                        LOADED_BLUEPRINTS.put(pos, bp);
-                                        player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u84dd\u56fe\u8f7d\u5165\u6210\u529f: \u00a7f" + selectedFile.getName()));
-                                        player.sendSystemMessage(Component.literal(String.format("\u00a7d\u25b6 \u88c5\u7f6e\u5c3a\u5bf8: \u00a7f%d \u00d7 %d \u00d7 %d \u00a77(\u653e\u7f6e\u5728 XYZ \u6b63\u8c61\u9650)", bp.sizeX, bp.sizeY, bp.sizeZ)));
-                                        player.sendSystemMessage(Component.literal("\u00a7e[\u63d0\u793a] \u5728\u5de5\u4f5c\u7ad9\u65c1\u8fb9\u653e\u7f6e\u7bb1\u5b50\u5e76\u653e\u5165\u6750\u6599\uff0c\u518d\u6b21\u53f3\u952e\u5de5\u4f5c\u7ad9\u6838\u5bf9\u6750\u6599\u5e76\u5f00\u5de5\uff01"));
-                                    }
-                                } catch (Exception e) {
-                                    player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u6587\u4ef6\u89e3\u6790\u5931\u8d25: 不是有效的蓝图 JSON 文件！"));
-                                }
-                            }
-                        } else {
-                            player.sendSystemMessage(Component.literal("\u00a77[\u63d0\u793a] \u5df2\u53d6\u6d88\u9009\u62e9\u6587\u4ef6"));
-                        }
-                    } catch (Exception ex) {
-                        player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u5524\u8d77\u7cfb\u7edf\u7a97\u53e3\u5f02\u5e38: " + ex.getMessage()));
-                    }
-                }, "BlueprintStation-NativeDialog").start();
-            }
-            return InteractionResult.SUCCESS;
-        }
-
-        // 阶段 2：已装载蓝图，右键核查四周箱子材料与自动建造
         if (!level.isClientSide() && level instanceof ServerLevel serverLevel) {
-            BlueprintWorkbenchBlock.BlueprintFile bp = LOADED_BLUEPRINTS.get(pos);
-            if (bp == null) return InteractionResult.SUCCESS;
+            BlueprintWorkbenchBlock.BlueprintFile blueprint = LOADED_BLUEPRINTS.get(pos);
 
-            player.sendSystemMessage(Component.literal("\u00a76========================================"));
-            player.sendSystemMessage(Component.literal("\u00a7e\ud83d\udccb [\u84dd\u56fe\u5de5\u4f5c\u7ad9] \u5efa\u9020\u6240\u9700\u6750\u6599\u4e0e\u8eab\u8fb9\u7bb1\u5b50\u5e93\u5b58\u6838\u5bf9:"));
-
-            boolean allReady = true;
-
-            for (Map.Entry<String, Integer> entry : bp.requiredMaterials.entrySet()) {
-                String matId = entry.getKey();
-                int needed = entry.getValue();
-
-                Item targetItem;
-                if (matId.contains("water")) {
-                    targetItem = Items.WATER_BUCKET;
-                } else if (matId.contains("lava")) {
-                    targetItem = Items.LAVA_BUCKET;
-                } else {
-                    Identifier id = Identifier.tryParse(matId);
-                    Block b = id != null ? BuiltInRegistries.BLOCK.get(id).map(Holder::value).orElse(Blocks.AIR) : Blocks.AIR;
-                    targetItem = b.asItem();
-                }
-
-                int currentCount = countAdjacentContainerItems(serverLevel, pos, targetItem);
-                String itemName = targetItem.getName(targetItem.getDefaultInstance()).getString();
-
-                if (currentCount >= needed) {
-                    player.sendSystemMessage(Component.literal(String.format("  \u00a7a\u2714 %s: %d / %d", itemName, currentCount, needed)));
-                } else {
-                    player.sendSystemMessage(Component.literal(String.format("  \u00a7c\u2718 %s: %d / %d \u00a7e(\u7f3a\u5c11 %d)", itemName, currentCount, needed, needed - currentCount)));
-                    allReady = false;
-                }
+            if (blueprint == null) {
+                player.sendSystemMessage(Component.literal("\u00a7e[\u84dd\u56fe\u5de5\u4f5c\u7ad9] \u6b63\u5728\u6253\u5f00\u7cfb\u7edf\u9009\u76d8\u7a97\u53e3\uff0c\u8bf7\u9009\u62e9\u84dd\u56fe JSON \u6587\u4ef6..."));
+                openNativeFileDialogAsync(serverLevel, pos, player);
+                return InteractionResult.SUCCESS;
             }
 
-            if (allReady) {
-                player.sendSystemMessage(Component.literal("\u00a7a\u26a1 \u6750\u6599\u5df2\u5168\u90e8\u9f50\u5168\uff01\u6b63\u5728\u6e05\u7406\u969c\u788d\u5e76\u81ea\u52a8\u5efa\u9020..."));
-                executeBuild(serverLevel, pos, bp);
-                LOADED_BLUEPRINTS.remove(pos); // 建造完毕后清空，允许下次放入新图纸
-            } else {
-                player.sendSystemMessage(Component.literal("\u00a7c\u26a0 \u6750\u6599\u4e0d\u8db3\uff01\u8bf7\u5728\u7d27\u90bb\u7bb1\u5b50\u4e2d\u8865\u9f50\u6750\u6599\u540e\u518d\u6b21\u53f3\u952e\u3002"));
-            }
-            player.sendSystemMessage(Component.literal("\u00a76========================================"));
+            verifyAndBuild(serverLevel, pos, player, blueprint);
         }
-
         return InteractionResult.SUCCESS;
     }
 
-    private int countAdjacentContainerItems(ServerLevel level, BlockPos stationPos, Item item) {
-        int total = 0;
-        for (Direction dir : Direction.values()) {
-            if (level.getBlockEntity(stationPos.relative(dir)) instanceof Container container) {
-                for (int i = 0; i < container.getContainerSize(); i++) {
-                    ItemStack stack = container.getItem(i);
-                    if (stack.is(item)) {
-                        total += stack.getCount();
+    private void openNativeFileDialogAsync(ServerLevel level, BlockPos pos, Player player) {
+        new Thread(() -> {
+            try {
+                String psScript = "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; " +
+                        "$f = New-Object System.Windows.Forms.OpenFileDialog; " +
+                        "$f.Filter = 'Blueprint JSON (*.json)|*.json'; " +
+                        "$f.Title = '选择要建造的蓝图文件'; " +
+                        "$f.TopMost = $true; " +
+                        "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }";
+
+                ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", psScript);
+                Process process = pb.start();
+
+                Scanner scanner = new Scanner(process.getInputStream(), "GBK");
+                String selectedPath = null;
+                if (scanner.hasNextLine()) {
+                    selectedPath = scanner.nextLine().trim();
+                }
+                scanner.close();
+                process.waitFor();
+
+                if (selectedPath != null && !selectedPath.isEmpty()) {
+                    File file = new File(selectedPath);
+                    if (file.exists()) {
+                        try (FileReader reader = new FileReader(file, StandardCharsets.UTF_8)) {
+                            BlueprintWorkbenchBlock.BlueprintFile loaded = GSON.fromJson(reader, BlueprintWorkbenchBlock.BlueprintFile.class);
+                            level.getServer().execute(() -> {
+                                LOADED_BLUEPRINTS.put(pos, loaded);
+                                player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u6210\u529f\u8f7d\u5165\u84dd\u56fe: \u00a7f" + file.getName()));
+                                player.sendSystemMessage(Component.literal("\u00a7e\ud83d\udce6 \u8bf7\u5728\u5de5\u4f5c\u7ad9\u7d27\u90bb\u653e\u7f6e\u7bb1\u5b50\u5e76\u653e\u5165\u6750\u6599\uff0c\u518d\u6b21\u53f3\u952e\u5f00\u59cb\u6838\u5bf9\u5efa\u9020\uff01"));
+                            });
+                            return;
+                        }
                     }
                 }
+                level.getServer().execute(() -> player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u53d6\u6d88\u4e86\u84dd\u56fe\u9009\u62e9\u3002")));
+            } catch (Exception e) {
+                level.getServer().execute(() -> player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u6253\u5f00\u6587\u4ef6\u7a97\u53e3\u5931\u8d25: " + e.getMessage())));
             }
-        }
-        return total;
+        }).start();
     }
 
-    private void executeBuild(ServerLevel level, BlockPos stationPos, BlueprintWorkbenchBlock.BlueprintFile bp) {
-        BlockPos origin = stationPos.offset(1, 0, 1);
+    private void verifyAndBuild(ServerLevel level, BlockPos pos, Player player, BlueprintWorkbenchBlock.BlueprintFile blueprint) {
+        List<Container> containers = getAdjacentContainers(level, pos);
+        if (containers.isEmpty()) {
+            player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u672a\u5728\u84dd\u56fe\u5de5\u4f5c\u7ad9\u56db\u5468\u627e\u5230\u4efb\u4f55\u5bb9\u5668\uff08\u7bb1\u5b50\uff09\uff01"));
+            return;
+        }
 
-        // 1. 逐层清理非基岩障碍物
-        for (int y = 0; y < bp.sizeY; y++) {
-            for (int x = 0; x < bp.sizeX; x++) {
-                for (int z = 0; z < bp.sizeZ; z++) {
-                    BlockPos p = origin.offset(x, y, z);
-                    BlockState bs = level.getBlockState(p);
-                    if (!bs.isAir() && !bs.is(Blocks.BEDROCK)) {
-                        level.setBlock(p, Blocks.AIR.defaultBlockState(), 3);
+        Map<String, Integer> inventoryCounts = new HashMap<>();
+        for (Container container : containers) {
+            for (int i = 0; i < container.getContainerSize(); i++) {
+                ItemStack stack = container.getItem(i);
+                if (!stack.isEmpty()) {
+                    String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+                    inventoryCounts.put(itemId, inventoryCounts.getOrDefault(itemId, 0) + stack.getCount());
+                }
+            }
+        }
+
+        boolean allSatisfied = true;
+        player.sendSystemMessage(Component.literal("\u00a76========================================"));
+        player.sendSystemMessage(Component.literal("\u00a7e\ud83d\udce5 \u3010\u84dd\u56fe\u5de5\u4f5c\u7ad9\u3011\u5efa\u9020\u6240\u9700\u6750\u6599\u4e0e\u7bb1\u5b50\u5e93\u5b58\u6838\u5bf9:"));
+
+        for (Map.Entry<String, Integer> req : blueprint.requiredMaterials.entrySet()) {
+            String requiredId = req.getKey();
+            int neededCount = req.getValue();
+
+            String matchingItemId = requiredId;
+            if (requiredId.contains("water")) matchingItemId = "minecraft:water_bucket";
+            else if (requiredId.contains("lava")) matchingItemId = "minecraft:lava_bucket";
+
+            int available = inventoryCounts.getOrDefault(matchingItemId, 0);
+
+            // 1.21.4 修复：从注册表取物品并正确获取其显示名称
+            Identifier itemIdent = Identifier.tryParse(matchingItemId);
+            Item item = (itemIdent != null) ? BuiltInRegistries.ITEM.getValue(itemIdent) : Items.AIR;
+            Component displayName = (item != Items.AIR) ? new ItemStack(item).getHoverName() : Component.literal(matchingItemId);
+
+            if (available >= neededCount) {
+                player.sendSystemMessage(Component.literal(String.format("  \u00a7a\u2714 %s: \u00a7f%d / %d", displayName.getString(), available, neededCount)));
+            } else {
+                allSatisfied = false;
+                player.sendSystemMessage(Component.literal(String.format("  \u00a7c\u2718 %s: \u00a7e%d / %d \u00a7c(\u7f3a\u5c11 %d)",
+                        displayName.getString(), available, neededCount, neededCount - available)));
+            }
+        }
+
+        if (!allSatisfied) {
+            player.sendSystemMessage(Component.literal("\u00a7c\u26a0 \u6750\u6599\u4e0d\u8db3\uff01\u8bf7\u5728\u7d27\u90bb\u7bb1\u5b50\u4e2d\u8865\u9f50\u6750\u6599\u540e\u518d\u6b21\u53f3\u952e\u3002"));
+            player.sendSystemMessage(Component.literal("\u00a76========================================"));
+            return;
+        }
+
+        player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u6240\u6709\u6750\u6599\u5177\u5907\uff01\u5f00\u59cb\u6d88\u8017\u6750\u6599\u5e76\u5b9e\u65bd\u81ea\u52a8\u5316\u5efa\u9020..."));
+        player.sendSystemMessage(Component.literal("\u00a76========================================"));
+
+        consumeMaterials(containers, blueprint.requiredMaterials);
+        executeBuild(level, pos, blueprint);
+        player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u7ed3\u6784\u5efa\u9020\u5b8c\u6210\uff01"));
+    }
+
+    private List<Container> getAdjacentContainers(ServerLevel level, BlockPos stationPos) {
+        List<Container> list = new ArrayList<>();
+        Set<BlockPos> visited = new HashSet<>();
+
+        for (Direction dir : Direction.values()) {
+            BlockPos targetPos = stationPos.relative(dir);
+            if (visited.contains(targetPos)) continue;
+
+            BlockState state = level.getBlockState(targetPos);
+            if (state.getBlock() instanceof ChestBlock chestBlock) {
+                Container chestInv = ChestBlock.getContainer(chestBlock, state, level, targetPos, true);
+                if (chestInv != null) {
+                    list.add(chestInv);
+                    visited.add(targetPos);
+                    for (Direction d2 : Direction.Plane.HORIZONTAL) {
+                        BlockPos pairPos = targetPos.relative(d2);
+                        if (level.getBlockState(pairPos).is(chestBlock)) {
+                            visited.add(pairPos);
+                        }
+                    }
+                }
+            } else {
+                BlockEntity be = level.getBlockEntity(targetPos);
+                if (be instanceof Container container) {
+                    list.add(container);
+                    visited.add(targetPos);
+                }
+            }
+        }
+        return list;
+    }
+
+    private void consumeMaterials(List<Container> containers, Map<String, Integer> requiredMaterials) {
+        for (Map.Entry<String, Integer> req : requiredMaterials.entrySet()) {
+            String matchingItemId = req.getKey();
+            boolean isWater = matchingItemId.contains("water");
+            boolean isLava = matchingItemId.contains("lava");
+            if (isWater) matchingItemId = "minecraft:water_bucket";
+            if (isLava) matchingItemId = "minecraft:lava_bucket";
+
+            int toRemove = req.getValue();
+            int returnBuckets = 0;
+
+            for (Container container : containers) {
+                if (toRemove <= 0) break;
+                for (int slot = 0; slot < container.getContainerSize(); slot++) {
+                    if (toRemove <= 0) break;
+                    ItemStack stack = container.getItem(slot);
+                    if (!stack.isEmpty()) {
+                        String stackId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+                        if (stackId.equals(matchingItemId)) {
+                            int take = Math.min(toRemove, stack.getCount());
+                            stack.shrink(take);
+                            toRemove -= take;
+                            if (isWater || isLava) returnBuckets += take;
+                            if (stack.isEmpty()) container.setItem(slot, ItemStack.EMPTY);
+                        }
+                    }
+                }
+            }
+
+            while (returnBuckets > 0) {
+                ItemStack bucketStack = new ItemStack(Items.BUCKET, Math.min(returnBuckets, 16));
+                returnBuckets -= bucketStack.getCount();
+                for (Container container : containers) {
+                    for (int slot = 0; slot < container.getContainerSize(); slot++) {
+                        ItemStack cur = container.getItem(slot);
+                        if (cur.isEmpty()) {
+                            container.setItem(slot, bucketStack);
+                            bucketStack = ItemStack.EMPTY;
+                            break;
+                        } else if (cur.is(Items.BUCKET) && cur.getCount() < 16) {
+                            int space = 16 - cur.getCount();
+                            int add = Math.min(space, bucketStack.getCount());
+                            cur.grow(add);
+                            bucketStack.shrink(add);
+                            if (bucketStack.isEmpty()) break;
+                        }
+                    }
+                    if (bucketStack.isEmpty()) break;
+                }
+            }
+        }
+    }
+
+    private void executeBuild(ServerLevel level, BlockPos stationPos, BlueprintWorkbenchBlock.BlueprintFile blueprint) {
+        BlockPos start = stationPos.above();
+
+        // 1. 平滑清障
+        for (int y = 0; y < blueprint.sizeY; y++) {
+            for (int x = 0; x < blueprint.sizeX; x++) {
+                for (int z = 0; z < blueprint.sizeZ; z++) {
+                    BlockPos p = start.offset(x, y, z);
+                    if (!level.getBlockState(p).is(Blocks.BEDROCK)) {
+                        level.setBlock(p, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
                     }
                 }
             }
         }
 
-        // 2. 扣除材料并建造实体方块
-        for (BlueprintWorkbenchBlock.BlockRecord rec : bp.blocks) {
-            if (!rec.isFluid) {
-                Identifier id = Identifier.tryParse(rec.blockId);
-                Block targetBlock = id != null ? BuiltInRegistries.BLOCK.get(id).map(Holder::value).orElse(Blocks.AIR) : Blocks.AIR;
-                if (consumeAdjacentItem(level, stationPos, targetBlock.asItem(), 1)) {
-                    level.setBlock(origin.offset(rec.relX, rec.relY, rec.relZ), targetBlock.defaultBlockState(), 3);
-                }
-            }
-        }
+        // 2. 放置实体方块与流体
+        for (BlueprintWorkbenchBlock.BlockRecord rec : blueprint.blocks) {
+            BlockPos targetPos = start.offset(rec.relX, rec.relY, rec.relZ);
 
-        // 3. 注入流体并返还空桶
-        for (BlueprintWorkbenchBlock.BlockRecord rec : bp.blocks) {
             if (rec.isFluid) {
-                BlockPos fPos = origin.offset(rec.relX, rec.relY, rec.relZ);
-                if (rec.blockId.contains("water") && consumeBucket(level, stationPos, Items.WATER_BUCKET)) {
-                    level.setBlock(fPos, Blocks.WATER.defaultBlockState(), 3);
-                } else if (rec.blockId.contains("lava") && consumeBucket(level, stationPos, Items.LAVA_BUCKET)) {
-                    level.setBlock(fPos, Blocks.LAVA.defaultBlockState(), 3);
+                Identifier fluidIdent = Identifier.tryParse(rec.blockId);
+                Fluid fluid = (fluidIdent != null) ? BuiltInRegistries.FLUID.getValue(fluidIdent) : Fluids.EMPTY;
+                if (fluid != Fluids.EMPTY) {
+                    level.setBlock(targetPos, fluid.defaultFluidState().createLegacyBlock(), Block.UPDATE_ALL);
+                }
+            } else {
+                Identifier blockIdent = Identifier.tryParse(rec.blockId);
+                Block block = (blockIdent != null) ? BuiltInRegistries.BLOCK.getValue(blockIdent) : Blocks.AIR;
+                if (block != Blocks.AIR) {
+                    BlockState placeState = block.defaultBlockState();
+                    if (rec.properties != null && !rec.properties.isEmpty()) {
+                        for (Map.Entry<String, String> entry : rec.properties.entrySet()) {
+                            Property<?> prop = block.getStateDefinition().getProperty(entry.getKey());
+                            if (prop != null) {
+                                placeState = setPropertyValue(placeState, prop, entry.getValue());
+                            }
+                        }
+                    }
+                    level.setBlock(targetPos, placeState, Block.UPDATE_ALL);
+                    level.sendParticles(ParticleTypes.HAPPY_VILLAGER, targetPos.getX() + 0.5, targetPos.getY() + 0.5, targetPos.getZ() + 0.5, 3, 0.2, 0.2, 0.2, 0);
                 }
             }
         }
-
-        level.playSound(null, stationPos, SoundEvents.ANVIL_USE, SoundSource.BLOCKS, 1.0f, 1.0f);
     }
 
-    private boolean consumeAdjacentItem(ServerLevel level, BlockPos stationPos, Item item, int count) {
-        int left = count;
-        for (Direction dir : Direction.values()) {
-            if (level.getBlockEntity(stationPos.relative(dir)) instanceof Container container) {
-                for (int i = 0; i < container.getContainerSize(); i++) {
-                    ItemStack stack = container.getItem(i);
-                    if (stack.is(item)) {
-                        int take = Math.min(left, stack.getCount());
-                        stack.shrink(take);
-                        left -= take;
-                        container.setChanged();
-                        if (left <= 0) return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean consumeBucket(ServerLevel level, BlockPos stationPos, Item bucketItem) {
-        for (Direction dir : Direction.values()) {
-            if (level.getBlockEntity(stationPos.relative(dir)) instanceof Container container) {
-                for (int i = 0; i < container.getContainerSize(); i++) {
-                    ItemStack stack = container.getItem(i);
-                    if (stack.is(bucketItem)) {
-                        stack.shrink(1);
-                        container.setItem(i, stack.isEmpty() ? new ItemStack(Items.BUCKET) : stack);
-                        container.setChanged();
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+    @SuppressWarnings("unchecked")
+    private static <T extends Comparable<T>> BlockState setPropertyValue(BlockState state, Property<T> property, String valueStr) {
+        Optional<T> val = property.getValue(valueStr);
+        return val.map(t -> state.setValue(property, t)).orElse(state);
     }
 }

@@ -12,10 +12,14 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
+import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.BlockHitResult;
 
@@ -41,13 +45,15 @@ public class BlueprintWorkbenchBlock extends Block {
         public int relX, relY, relZ;
         public String blockId;
         public boolean isFluid;
+        public Map<String, String> properties;
 
-        public BlockRecord(int x, int y, int z, String id, boolean fluid) {
+        public BlockRecord(int x, int y, int z, String id, boolean fluid, Map<String, String> properties) {
             this.relX = x;
             this.relY = y;
             this.relZ = z;
             this.blockId = id;
             this.isFluid = fluid;
+            this.properties = properties;
         }
     }
 
@@ -131,9 +137,7 @@ public class BlueprintWorkbenchBlock extends Block {
                         if (!allCornersValid) break;
                     }
 
-                    if (allCornersValid) {
-                        return p2;
-                    }
+                    if (allCornersValid) return p2;
                 }
             }
         }
@@ -233,11 +237,11 @@ public class BlueprintWorkbenchBlock extends Block {
                     int relY = y - minY;
                     int relZ = z - minZ;
 
-                    // 1. 严格判断流体：必须是非空且严格是源头 (isSource)，完全忽略流动水/流动岩浆
+                    // 1. 流体源头识别（严格过滤流动水/岩浆）
                     if (!fState.isEmpty()) {
                         if (fState.isSource()) {
                             String fluidId = BuiltInRegistries.FLUID.getKey(fState.getType()).toString();
-                            fileData.blocks.add(new BlockRecord(relX, relY, relZ, fluidId, true));
+                            fileData.blocks.add(new BlockRecord(relX, relY, relZ, fluidId, true, Collections.emptyMap()));
                             fileData.requiredMaterials.put(fluidId, fileData.requiredMaterials.getOrDefault(fluidId, 0) + 1);
 
                             int px = (int) ((double) relX / sizeX * imgW);
@@ -245,16 +249,35 @@ public class BlueprintWorkbenchBlock extends Block {
                             g.setColor(fluidId.contains("water") ? new Color(30, 144, 255) : new Color(255, 69, 0));
                             g.fillRect(px, pz, Math.max(2, imgW / sizeX), Math.max(2, imgH / sizeZ));
                         }
-                        // 流动的流体直接跳过，不计入实体方块，也不计入材料
                         continue;
                     }
 
-                    // 2. 实体方块（排除空气）
+                    // 2. 实体方块识别
                     if (!bState.isAir()) {
                         Identifier bId = BuiltInRegistries.BLOCK.getKey(bState.getBlock());
                         String idStr = bId.toString();
-                        fileData.blocks.add(new BlockRecord(relX, relY, relZ, idStr, false));
-                        fileData.requiredMaterials.put(idStr, fileData.requiredMaterials.getOrDefault(idStr, 0) + 1);
+
+                        // 保存完整方块属性状态（朝向、part、type等）
+                        Map<String, String> props = new HashMap<>();
+                        for (Property<?> prop : bState.getProperties()) {
+                            props.put(prop.getName(), getPropValueString(bState, prop));
+                        }
+
+                        fileData.blocks.add(new BlockRecord(relX, relY, relZ, idStr, false, props));
+
+                        // 过滤多方块结构的重复材料计数：
+                        // 床只计 FOOT 端；门只计 LOWER 端
+                        boolean skipCount = false;
+                        if (bState.hasProperty(BedBlock.PART) && bState.getValue(BedBlock.PART) == BedPart.HEAD) {
+                            skipCount = true;
+                        }
+                        if (bState.hasProperty(DoorBlock.HALF) && bState.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER) {
+                            skipCount = true;
+                        }
+
+                        if (!skipCount) {
+                            fileData.requiredMaterials.put(idStr, fileData.requiredMaterials.getOrDefault(idStr, 0) + 1);
+                        }
 
                         int px = (int) ((double) relX / sizeX * imgW);
                         int pz = (int) ((double) relZ / sizeZ * imgH);
@@ -276,10 +299,15 @@ public class BlueprintWorkbenchBlock extends Block {
 
             player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u84dd\u56fe\u5df2\u6210\u529f\u63d0\u53d6\u5e76\u5bfc\u51fa\uff01"));
             player.sendSystemMessage(Component.literal("\u00a7b\ud83d\udcc4 \u6587\u4ef6: \u00a7f" + json.getName()));
-            player.sendSystemMessage(Component.literal(String.format("\u00a7e\ud83d\udcca \u5171\u8bb0\u5f55 \u00a7f%d \u00a7e\u4e2a\u65b9\u5757/\u6e90\u5934\uff0c\u6750\u6599\u79cd\u7c7b: \u00a7f%d",
+            player.sendSystemMessage(Component.literal(String.format("\u00a7e\ud83d\udcca \u5171\u8bb0\u5f55 \u00a7f%d \u00a7e\u4e2a\u65b9\u5757\uff0c\u6750\u6599\u79cd\u7c7b: \u00a7f%d",
                     fileData.blocks.size(), fileData.requiredMaterials.size())));
         } catch (Exception e) {
             player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u5bfc\u51fa\u6587\u4ef6\u5931\u8d25: " + e.getMessage()));
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Comparable<T>> String getPropValueString(BlockState state, Property<T> property) {
+        return property.getName(state.getValue(property));
     }
 }
