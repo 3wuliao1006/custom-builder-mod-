@@ -35,9 +35,20 @@ public class BlueprintStationBlock extends Block {
 
     private static final Gson GSON = new Gson();
     private static final Map<BlockPos, BlueprintWorkbenchBlock.BlueprintFile> LOADED_BLUEPRINTS = new HashMap<>();
+    private static final Map<UUID, BlockPos> PENDING_NO_PUMPKIN_CONFIRM = new HashMap<>();
 
     public BlueprintStationBlock(BlockBehaviour.Properties properties) {
         super(properties);
+    }
+
+    /**
+     * 玩家挖掘破坏工作站时，清空该坐标的蓝图数据与确认缓存，以便再次放置时可重新选盘
+     */
+    @Override
+    public BlockState playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+        LOADED_BLUEPRINTS.remove(pos);
+        PENDING_NO_PUMPKIN_CONFIRM.values().removeIf(p -> p.equals(pos));
+        return super.playerWillDestroy(level, pos, state, player);
     }
 
     @Override
@@ -46,7 +57,7 @@ public class BlueprintStationBlock extends Block {
             BlueprintWorkbenchBlock.BlueprintFile blueprint = LOADED_BLUEPRINTS.get(pos);
 
             if (blueprint == null) {
-                player.sendSystemMessage(Component.literal("\u00a7e[\u84dd\u56fe\u5de5\u4f5c\u7ad9] \u6b63\u5728\u6253\u5f00\u7cfb\u7edf\u9009\u76d8\u7a97\u53e3\uff0c\u8bf7\u9009\u62e9\u84dd\u56fe JSON \u6587\u4ef6..."));
+                player.sendSystemMessage(Component.literal("§e[蓝图工作站] 正在打开系统选盘窗口，请选择蓝图 JSON 文件..."));
                 openNativeFileDialogAsync(serverLevel, pos, player);
                 return InteractionResult.SUCCESS;
             }
@@ -84,24 +95,57 @@ public class BlueprintStationBlock extends Block {
                             BlueprintWorkbenchBlock.BlueprintFile loaded = GSON.fromJson(reader, BlueprintWorkbenchBlock.BlueprintFile.class);
                             level.getServer().execute(() -> {
                                 LOADED_BLUEPRINTS.put(pos, loaded);
-                                player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u6210\u529f\u8f7d\u5165\u84dd\u56fe: \u00a7f" + file.getName()));
-                                player.sendSystemMessage(Component.literal("\u00a7e\ud83d\udce6 \u8bf7\u5728\u5de5\u4f5c\u7ad9\u7d27\u90bb\u653e\u7f6e\u7bb1\u5b50\u5e76\u653e\u5165\u6750\u6599\uff0c\u518d\u6b21\u53f3\u952e\u5f00\u59cb\u6838\u5bf9\u5efa\u9020\uff01"));
+                                player.sendSystemMessage(Component.literal("§a✔ 成功载入蓝图: §f" + file.getName()));
+                                if (player.isCreative()) {
+                                    player.sendSystemMessage(Component.literal("§d✨ 检测到创造模式，再次右键将免材一键建造！"));
+                                } else {
+                                    player.sendSystemMessage(Component.literal("§e📦 请在工作站紧邻放置箱子并放入材料，再次右键开始核对建造！"));
+                                }
                             });
                             return;
                         }
                     }
                 }
-                level.getServer().execute(() -> player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u53d6\u6d88\u4e86\u84dd\u56fe\u9009\u62e9\u3002")));
+                level.getServer().execute(() -> player.sendSystemMessage(Component.literal("§c✘ 取消了蓝图选择。")));
             } catch (Exception e) {
-                level.getServer().execute(() -> player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u6253\u5f00\u6587\u4ef6\u7a97\u53e3\u5931\u8d25: " + e.getMessage())));
+                level.getServer().execute(() -> player.sendSystemMessage(Component.literal("§c✘ 打开文件窗口失败: " + e.getMessage())));
             }
         }).start();
     }
 
     private void verifyAndBuild(ServerLevel level, BlockPos pos, Player player, BlueprintWorkbenchBlock.BlueprintFile blueprint) {
+        BlockPos targetPumpkin = scanForPumpkin(level, pos);
+        UUID uuid = player.getUUID();
+
+        if (blueprint.hasAnchor && targetPumpkin == null) {
+            BlockPos pendingPos = PENDING_NO_PUMPKIN_CONFIRM.get(uuid);
+            if (pendingPos == null || !pendingPos.equals(pos)) {
+                PENDING_NO_PUMPKIN_CONFIRM.put(uuid, pos);
+                player.sendSystemMessage(Component.literal("§6========================================"));
+                player.sendSystemMessage(Component.literal("§e⚠ 未在周围 (前6后6左6右6高3) 检测到定位南瓜！"));
+                player.sendSystemMessage(Component.literal("§f该蓝图带有锚点，若现在建造将默认以工作站正上方为基准。"));
+                player.sendSystemMessage(Component.literal("§a👉 如确定不放南瓜直接建造，请【再次右键工作站】确认建造！"));
+                player.sendSystemMessage(Component.literal("§7(若想精准对齐，请先在合适位置摆放南瓜后再右键)"));
+                player.sendSystemMessage(Component.literal("§6========================================"));
+                return;
+            }
+            PENDING_NO_PUMPKIN_CONFIRM.remove(uuid);
+        } else {
+            PENDING_NO_PUMPKIN_CONFIRM.remove(uuid);
+        }
+
+        if (player.isCreative()) {
+            player.sendSystemMessage(Component.literal("§6========================================"));
+            player.sendSystemMessage(Component.literal("§d✨ 【蓝图工作站】创造模式特权：无需材料与箱子，开始一键生成结构！"));
+            player.sendSystemMessage(Component.literal("§6========================================"));
+            executeBuild(level, pos, player, blueprint, targetPumpkin);
+            player.sendSystemMessage(Component.literal("§a✔ 结构一键建造完成！"));
+            return;
+        }
+
         List<Container> containers = getAdjacentContainers(level, pos);
         if (containers.isEmpty()) {
-            player.sendSystemMessage(Component.literal("\u00a7c\u2718 \u672a\u5728\u84dd\u56fe\u5de5\u4f5c\u7ad9\u56db\u5468\u627e\u5230\u4efb\u4f55\u5bb9\u5668\uff08\u7bb1\u5b50\uff09\uff01"));
+            player.sendSystemMessage(Component.literal("§c✘ 未在蓝图工作站四周找到任何容器（箱子）！"));
             return;
         }
 
@@ -117,8 +161,8 @@ public class BlueprintStationBlock extends Block {
         }
 
         boolean allSatisfied = true;
-        player.sendSystemMessage(Component.literal("\u00a76========================================"));
-        player.sendSystemMessage(Component.literal("\u00a7e\ud83d\udce5 \u3010\u84dd\u56fe\u5de5\u4f5c\u7ad9\u3011\u5efa\u9020\u6240\u9700\u6750\u6599\u4e0e\u7bb1\u5b50\u5e93\u5b58\u6838\u5bf9:"));
+        player.sendSystemMessage(Component.literal("§6========================================"));
+        player.sendSystemMessage(Component.literal("§e📥 【蓝图工作站】建造所需材料与箱子库存核对:"));
 
         for (Map.Entry<String, Integer> req : blueprint.requiredMaterials.entrySet()) {
             String requiredId = req.getKey();
@@ -127,35 +171,50 @@ public class BlueprintStationBlock extends Block {
             String matchingItemId = requiredId;
             if (requiredId.contains("water")) matchingItemId = "minecraft:water_bucket";
             else if (requiredId.contains("lava")) matchingItemId = "minecraft:lava_bucket";
+            else if (!matchingItemId.contains(":")) matchingItemId = "minecraft:" + matchingItemId;
 
             int available = inventoryCounts.getOrDefault(matchingItemId, 0);
 
-            // 1.21.4 修复：从注册表取物品并正确获取其显示名称
             Identifier itemIdent = Identifier.tryParse(matchingItemId);
             Item item = (itemIdent != null) ? BuiltInRegistries.ITEM.getValue(itemIdent) : Items.AIR;
             Component displayName = (item != Items.AIR) ? new ItemStack(item).getHoverName() : Component.literal(matchingItemId);
 
             if (available >= neededCount) {
-                player.sendSystemMessage(Component.literal(String.format("  \u00a7a\u2714 %s: \u00a7f%d / %d", displayName.getString(), available, neededCount)));
+                player.sendSystemMessage(Component.literal(String.format("  §a✔ %s: §f%d / %d", displayName.getString(), available, neededCount)));
             } else {
                 allSatisfied = false;
-                player.sendSystemMessage(Component.literal(String.format("  \u00a7c\u2718 %s: \u00a7e%d / %d \u00a7c(\u7f3a\u5c11 %d)",
+                player.sendSystemMessage(Component.literal(String.format("  §c✘ %s: §e%d / %d §c(缺少 %d)",
                         displayName.getString(), available, neededCount, neededCount - available)));
             }
         }
 
         if (!allSatisfied) {
-            player.sendSystemMessage(Component.literal("\u00a7c\u26a0 \u6750\u6599\u4e0d\u8db3\uff01\u8bf7\u5728\u7d27\u90bb\u7bb1\u5b50\u4e2d\u8865\u9f50\u6750\u6599\u540e\u518d\u6b21\u53f3\u952e\u3002"));
-            player.sendSystemMessage(Component.literal("\u00a76========================================"));
+            player.sendSystemMessage(Component.literal("§c⚠ 材料不足！请在紧邻箱子中补齐材料后再点击建造。"));
+            player.sendSystemMessage(Component.literal("§6========================================"));
             return;
         }
 
-        player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u6240\u6709\u6750\u6599\u5177\u5907\uff01\u5f00\u59cb\u6d88\u8017\u6750\u6599\u5e76\u5b9e\u65bd\u81ea\u52a8\u5316\u5efa\u9020..."));
-        player.sendSystemMessage(Component.literal("\u00a76========================================"));
+        player.sendSystemMessage(Component.literal("§a✔ 所有材料具备！开始消耗材料并实施自动化建造..."));
+        player.sendSystemMessage(Component.literal("§6========================================"));
 
         consumeMaterials(containers, blueprint.requiredMaterials);
-        executeBuild(level, pos, blueprint);
-        player.sendSystemMessage(Component.literal("\u00a7a\u2714 \u7ed3\u6784\u5efa\u9020\u5b8c\u6210\uff01"));
+        executeBuild(level, pos, player, blueprint, targetPumpkin);
+        player.sendSystemMessage(Component.literal("§a✔ 结构建造完成！"));
+    }
+
+    private BlockPos scanForPumpkin(ServerLevel level, BlockPos stationPos) {
+        for (int dy = 0; dy <= 3; dy++) {
+            for (int dx = -6; dx <= 6; dx++) {
+                for (int dz = -6; dz <= 6; dz++) {
+                    BlockPos checkPos = stationPos.offset(dx, dy, dz);
+                    String pid = BuiltInRegistries.BLOCK.getKey(level.getBlockState(checkPos).getBlock()).getPath();
+                    if (pid.equals("pumpkin") || pid.equals("carved_pumpkin")) {
+                        return checkPos;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private List<Container> getAdjacentContainers(ServerLevel level, BlockPos stationPos) {
@@ -197,6 +256,7 @@ public class BlueprintStationBlock extends Block {
             boolean isLava = matchingItemId.contains("lava");
             if (isWater) matchingItemId = "minecraft:water_bucket";
             if (isLava) matchingItemId = "minecraft:lava_bucket";
+            if (!matchingItemId.contains(":")) matchingItemId = "minecraft:" + matchingItemId;
 
             int toRemove = req.getValue();
             int returnBuckets = 0;
@@ -243,8 +303,13 @@ public class BlueprintStationBlock extends Block {
         }
     }
 
-    private void executeBuild(ServerLevel level, BlockPos stationPos, BlueprintWorkbenchBlock.BlueprintFile blueprint) {
+    private void executeBuild(ServerLevel level, BlockPos stationPos, Player player, BlueprintWorkbenchBlock.BlueprintFile blueprint, BlockPos targetPumpkin) {
         BlockPos start = stationPos.above();
+
+        if (blueprint.hasAnchor && targetPumpkin != null) {
+            start = targetPumpkin.offset(-blueprint.anchorX, -blueprint.anchorY, -blueprint.anchorZ);
+            player.sendSystemMessage(Component.literal("§6🎃 找到定位南瓜！正在以南瓜为基准完美对齐建造..."));
+        }
 
         // 1. 平滑清障
         for (int y = 0; y < blueprint.sizeY; y++) {
@@ -258,34 +323,95 @@ public class BlueprintStationBlock extends Block {
             }
         }
 
-        // 2. 放置实体方块与流体
-        for (BlueprintWorkbenchBlock.BlockRecord rec : blueprint.blocks) {
-            BlockPos targetPos = start.offset(rec.relX, rec.relY, rec.relZ);
+        // 2. 分类
+        List<BlueprintWorkbenchBlock.BlockRecord> phase1SolidBlocks = new ArrayList<>();
+        List<BlueprintWorkbenchBlock.BlockRecord> phase2AttachedAndFluids = new ArrayList<>();
 
-            if (rec.isFluid) {
-                Identifier fluidIdent = Identifier.tryParse(rec.blockId);
-                Fluid fluid = (fluidIdent != null) ? BuiltInRegistries.FLUID.getValue(fluidIdent) : Fluids.EMPTY;
-                if (fluid != Fluids.EMPTY) {
-                    level.setBlock(targetPos, fluid.defaultFluidState().createLegacyBlock(), Block.UPDATE_ALL);
-                }
+        for (BlueprintWorkbenchBlock.BlockRecord rec : blueprint.blocks) {
+            if (rec.isFluid || isAttachedBlock(rec.blockId)) {
+                phase2AttachedAndFluids.add(rec);
             } else {
-                Identifier blockIdent = Identifier.tryParse(rec.blockId);
-                Block block = (blockIdent != null) ? BuiltInRegistries.BLOCK.getValue(blockIdent) : Blocks.AIR;
-                if (block != Blocks.AIR) {
-                    BlockState placeState = block.defaultBlockState();
-                    if (rec.properties != null && !rec.properties.isEmpty()) {
-                        for (Map.Entry<String, String> entry : rec.properties.entrySet()) {
-                            Property<?> prop = block.getStateDefinition().getProperty(entry.getKey());
-                            if (prop != null) {
-                                placeState = setPropertyValue(placeState, prop, entry.getValue());
-                            }
-                        }
-                    }
-                    level.setBlock(targetPos, placeState, Block.UPDATE_ALL);
-                    level.sendParticles(ParticleTypes.HAPPY_VILLAGER, targetPos.getX() + 0.5, targetPos.getY() + 0.5, targetPos.getZ() + 0.5, 3, 0.2, 0.2, 0.2, 0);
-                }
+                phase1SolidBlocks.add(rec);
             }
         }
+
+        // 阶段二排序
+        phase2AttachedAndFluids.sort((a, b) -> {
+            if (a.relY != b.relY) {
+                return Integer.compare(a.relY, b.relY);
+            }
+            boolean aIsFoot = a.properties != null && "foot".equals(a.properties.get("part"));
+            boolean bIsFoot = b.properties != null && "foot".equals(b.properties.get("part"));
+            if (aIsFoot && !bIsFoot) return -1;
+            if (!aIsFoot && bIsFoot) return 1;
+
+            boolean aIsDoorLower = a.properties != null && "lower".equals(a.properties.get("half"));
+            boolean bIsDoorLower = b.properties != null && "lower".equals(b.properties.get("half"));
+            if (aIsDoorLower && !bIsDoorLower) return -1;
+            if (!aIsDoorLower && bIsDoorLower) return 1;
+
+            return 0;
+        });
+
+        int silentPlaceFlag = Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE | Block.UPDATE_SUPPRESS_DROPS;
+
+        // 第一阶段放置：实体方块与箱子
+        for (BlueprintWorkbenchBlock.BlockRecord rec : phase1SolidBlocks) {
+            placeSingleBlock(level, start, rec, silentPlaceFlag);
+        }
+
+        // 第二阶段放置：附着物
+        for (BlueprintWorkbenchBlock.BlockRecord rec : phase2AttachedAndFluids) {
+            placeSingleBlock(level, start, rec, silentPlaceFlag);
+        }
+    }
+
+    private void placeSingleBlock(ServerLevel level, BlockPos start, BlueprintWorkbenchBlock.BlockRecord rec, int flag) {
+        BlockPos targetPos = start.offset(rec.relX, rec.relY, rec.relZ);
+
+        if (rec.isFluid) {
+            Identifier fluidIdent = Identifier.tryParse(rec.blockId.contains(":") ? rec.blockId : "minecraft:" + rec.blockId);
+            Fluid fluid = (fluidIdent != null) ? BuiltInRegistries.FLUID.getValue(fluidIdent) : Fluids.EMPTY;
+            if (fluid != Fluids.EMPTY) {
+                level.setBlock(targetPos, fluid.defaultFluidState().createLegacyBlock(), Block.UPDATE_ALL);
+            }
+        } else {
+            Identifier blockIdent = Identifier.tryParse(rec.blockId.contains(":") ? rec.blockId : "minecraft:" + rec.blockId);
+            Block block = (blockIdent != null) ? BuiltInRegistries.BLOCK.getValue(blockIdent) : Blocks.AIR;
+            if (block != Blocks.AIR) {
+                BlockState placeState = block.defaultBlockState();
+                if (rec.properties != null && !rec.properties.isEmpty()) {
+                    for (Map.Entry<String, String> entry : rec.properties.entrySet()) {
+                        Property<?> prop = block.getStateDefinition().getProperty(entry.getKey());
+                        if (prop != null) {
+                            placeState = setPropertyValue(placeState, prop, entry.getValue());
+                        }
+                    }
+                }
+                level.setBlock(targetPos, placeState, flag);
+                level.sendParticles(ParticleTypes.HAPPY_VILLAGER, targetPos.getX() + 0.5, targetPos.getY() + 0.5, targetPos.getZ() + 0.5, 2, 0.1, 0.1, 0.1, 0);
+            }
+        }
+    }
+
+    private boolean isAttachedBlock(String blockId) {
+        if (blockId == null) return false;
+        String id = blockId.toLowerCase();
+        return id.contains("lever")
+                || id.contains("torch")
+                || id.contains("button")
+                || id.contains("trapdoor")
+                || id.contains("repeater")
+                || id.contains("comparator")
+                || id.contains("redstone_wire")
+                || id.contains("rail")
+                || id.contains("door")
+                || id.contains("bed")
+                || id.contains("carpet")
+                || id.contains("ladder")
+                || id.contains("tripwire")
+                || id.contains("sign")
+                || id.contains("pressure_plate");
     }
 
     @SuppressWarnings("unchecked")
