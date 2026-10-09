@@ -1,18 +1,16 @@
-﻿{
+{
   "type": "minecraft:crafting_shaped",
   "category": "misc",
   "pattern": [
-    "PPP",
-    "III",
-    "LLL"
+    "###",
+    "###",
+    "###"
   ],
   "key": {
-    "P": "minecraft:paper",
-    "I": "minecraft:iron_ingot",
-    "L": "#minecraft:logs"
+    "#": "minecraft:stick"
   },
   "result": {
-    "id": "custom_builder:blueprint_workbench",
-    "count": 1
+    "count": 1,
+    "id": "custom_builder:blueprint_workbench"
   }
 }
