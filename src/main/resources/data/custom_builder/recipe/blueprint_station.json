@@ -1,16 +1,17 @@
-﻿{
+{
   "type": "minecraft:crafting_shaped",
   "category": "misc",
   "pattern": [
     "###",
-    "# #",
+    "#P#",
     "###"
   ],
   "key": {
-    "#": "custom_builder:blueprint_workbench"
+    "#": "minecraft:stick",
+    "P": "#minecraft:planks"
   },
   "result": {
-    "id": "custom_builder:blueprint_station",
-    "count": 1
+    "count": 1,
+    "id": "custom_builder:blueprint_station"
   }
 }
